@@ -5,15 +5,15 @@
 
 Authors
 -------------------------------------------------------------------------------
-Yafeng Li
-E-Mail: <lyf8118@126.com>
-Wechat: lyf8118521
-GNSS软件接收机技术讨论QQ群：147304049
+* Yafeng Li
+    * E-Mail: <lyf8118@126.com>
+    * Wechat: lyf8118521
+    * GNSS软件接收机技术讨论QQ群：147304049
 
 
-Dennis Akos  
-E-Mail: <dma@colorado.edu>
-HP: <http://www.colorado.edu/aerospace/dennis-akos>
+* Dennis Akos  
+    * E-Mail: <dma@colorado.edu>
+    * HP: <http://www.colorado.edu/aerospace/dennis-akos>
 
 
 

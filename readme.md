@@ -28,15 +28,15 @@ evaluation.
 
 Authors
 -------------------------------------------------------------------------------
-Yafeng Li
-E-Mail: <lyf8118@126.com>
-Wechat: lyf8118521
-QQ Group for Technical Discussions on GNSS Software Receivers: 147304049
+* Yafeng Li
+    * E-Mail: <lyf8118@126.com>
+    * Wechat: lyf8118521
+    * QQ Group for Technical Discussions on GNSS Software Receivers: 147304049
 
 
-Dennis Akos  
-E-Mail: <dma@colorado.edu>
-HP: <http://www.colorado.edu/aerospace/dennis-akos>
+* Dennis Akos  
+    * E-Mail: <dma@colorado.edu>
+    * HP: <http://www.colorado.edu/aerospace/dennis-akos>
 
 
 
