@@ -1,0 +1,851 @@
+# -*- coding: utf-8 -*-
+"""
+-------------------------------------------------------------------------------
+pySoftGNSS: A Python-Based GNSS Software Receiver.
+
+pySoftGNSS is a Python implementation of a post-processing GNSS software
+receiver. Its overall receiver architecture is inspired by the open-source
+MATLAB SoftGNSS project and follows the conventional processing chain of
+signal acquisition, tracking, navigation-message decoding, and position
+computation.
+
+The Python source code, class organization, data interfaces, and integration
+of the SIMD- and GPU-accelerated correlators were developed specifically for
+pySoftGNSS. SoftGNSS is acknowledged as the architectural reference, while
+pySoftGNSS is maintained as a separate Python implementation.
+
+Author:
+Yafeng Li
+School of Automation
+Beijing Information Science and Technology University
+
+August 2026
+
+Copyright (C) 2026 Yafeng Li.
+-------------------------------------------------------------------------------
+
+correlator.py - Module Description
+----------------------------------
+Generate, sample, and correlate Galileo E5bI/E5bQ codes.
+
+"""
+
+import ctypes
+from functools import lru_cache
+
+import numpy as np
+
+
+#%% CPU SIMD correlator for channel-serial tracking
+class CorrSIMDSerialQPSK:
+    """Call the channel-serial AVX2 QPSK tracking correlator."""
+
+    def __init__(self):
+        """Load the SIMD DLL and declare its ctypes interface.
+        """
+        dllPath = "../native_Correlators/corrSIMDSerialQPSK.dll"
+        self._simdLibrary = ctypes.CDLL(dllPath)
+
+        int16Vector = np.ctypeslib.ndpointer(
+            dtype=np.int16, ndim=1, flags="C_CONTIGUOUS")
+        int32Vector = np.ctypeslib.ndpointer(
+            dtype=np.int32, ndim=1, flags="C_CONTIGUOUS")
+
+        self._simdLibrary.corrEngine.argtypes = [
+            ctypes.c_int,     # settings.fileType
+            ctypes.c_int,     # rawSignal.size
+            ctypes.c_int,     # settings.rShiftBits
+            ctypes.c_double,  # settings.dllCorrelatorSpacing
+            int16Vector,      # rawSignal
+            int32Vector,      # E5bCodeTable
+            ctypes.c_int,     # E5bCodeTable.size // 2
+            ctypes.c_double,  # remCarrPhase
+            ctypes.c_double,  # carrPhaseStep
+            ctypes.c_double,  # remCodePhase
+            ctypes.c_double,  # codePhaseStep
+        ]
+        self._simdLibrary.corrEngine.restype = ctypes.POINTER(ctypes.c_double)
+
+        # This is the clearup function
+        self._simdLibrary.corrEngineFree.argtypes = []
+        self._simdLibrary.corrEngineFree.restype = None
+
+    def corrEngine(self, settings, rawSignal, E5bCodeTable, remCarrPhase,
+                   carrPhaseStep, remCodePhase, codePhaseStep):
+        """Correlate one channel and one code period.
+
+        Args
+        ----
+            settings    - object
+                        Receiver settings containing ``fileType``,
+                        ``rShiftBits`` and ``dllCorrelatorSpacing``.
+            rawSignal   - numpy.ndarray
+                        Input int16 IF samples. Complex samples are stored as
+                        interleaved I/Q values.
+            E5bCodeTable - numpy.ndarray
+                        Concatenated guarded int32 E5bI/E5bQ codes:
+                        ``[E5bI(last, period, first),
+                        E5bQ(last, period, first)]``.
+            remCarrPhase - float
+                         Residual carrier phase in radians.
+            carrPhaseStep - float
+                          Carrier phase increment in radians per sample.
+            remCodePhase - float
+                         Residual code phase in chips.
+            codePhaseStep - float
+                          Code phase increment in chips per sample.
+        Returns
+        -------
+            correValues - numpy.ndarray
+                        E5bI correlations followed by E5bQ correlations; each
+                        branch is ``[I_E, Q_E, I_P, Q_P, I_L, Q_L]``.
+        """
+
+        corrPointer = self._simdLibrary.corrEngine(
+            settings.fileType,
+            rawSignal.size,
+            settings.rShiftBits,
+            settings.dllCorrelatorSpacing,
+            rawSignal,
+            E5bCodeTable,
+            E5bCodeTable.size // 2,
+            remCarrPhase,
+            carrPhaseStep,
+            remCodePhase,
+            codePhaseStep,
+        )
+        if not corrPointer:
+            raise RuntimeError("SIMD correlator initialization failed")
+
+        # The C++ output is static and is overwritten by the next call.
+        return np.ctypeslib.as_array(corrPointer, shape=(12,)).copy()
+
+    def close(self):
+        """Release the reusable buffers allocated by the C++ engine.
+        """
+        self._simdLibrary.corrEngineFree()
+
+
+#%% GPU correlator for channel-serial tracking
+class CorrGPUSerialQPSK:
+    """Call the channel-serial CUDA QPSK tracking correlator."""
+
+    def __init__(self):
+        """Load the CUDA DLL and declare its ctypes interface.
+        """
+        dllPath = "../native_Correlators/corrGPUSerialQPSK.dll"
+        self._gpuLibrary = ctypes.CDLL(dllPath)
+
+        int16Vector = np.ctypeslib.ndpointer(
+            dtype=np.int16, ndim=1, flags="C_CONTIGUOUS")
+        int8Vector = np.ctypeslib.ndpointer(
+            dtype=np.int8, ndim=1, flags="C_CONTIGUOUS")
+
+        self._gpuLibrary.corrEngine.argtypes = [
+            ctypes.c_int,     # settings.fileType
+            ctypes.c_int,     # rawSignal.size
+            ctypes.c_double,  # settings.dllCorrelatorSpacing
+            int16Vector,      # rawSignal
+            int8Vector,       # E5bCodeTable
+            ctypes.c_int,     # E5bCodeTable.size // 2
+            ctypes.c_double,  # remCarrPhase
+            ctypes.c_double,  # carrPhaseStep
+            ctypes.c_double,  # remCodePhase
+            ctypes.c_double,  # codePhaseStep
+            ctypes.c_int,     # PRN
+        ]
+        self._gpuLibrary.corrEngine.restype = ctypes.POINTER(ctypes.c_double)
+
+        self._gpuLibrary.corrEngineFree.argtypes = []
+        self._gpuLibrary.corrEngineFree.restype = None
+
+    def corrEngine(self, settings, rawSignal, E5bCodeTable, remCarrPhase,
+                   carrPhaseStep, remCodePhase, codePhaseStep, PRN):
+        """Correlate one channel and one code period on the GPU.
+
+        Args
+        ----
+            settings    - object
+                        Receiver settings containing ``fileType`` and
+                        ``dllCorrelatorSpacing``.
+            rawSignal   - numpy.ndarray
+                        Input int16 IF samples. Complex samples are stored as
+                        interleaved I/Q values.
+            E5bCodeTable - numpy.ndarray
+                        Concatenated guarded int8 E5bI/E5bQ codes:
+                        ``[E5bI(last, period, first),
+                        E5bQ(last, period, first)]``.
+            remCarrPhase - float
+                         Residual carrier phase in radians.
+            carrPhaseStep - float
+                          Carrier phase increment in radians per sample.
+            remCodePhase - float
+                         Residual code phase in chips.
+            codePhaseStep - float
+                          Code phase increment in chips per sample.
+            PRN         - int
+                        Current satellite PRN used for code caching.
+
+        Returns
+        -------
+            correValues - numpy.ndarray
+                        E5bI correlations followed by E5bQ correlations; each
+                        branch is ``[I_E, Q_E, I_P, Q_P, I_L, Q_L]``.
+        """
+
+        corrPointer = self._gpuLibrary.corrEngine(
+            settings.fileType,
+            rawSignal.size,
+            settings.dllCorrelatorSpacing,
+            rawSignal,
+            E5bCodeTable,
+            E5bCodeTable.size // 2,
+            remCarrPhase,
+            carrPhaseStep,
+            remCodePhase,
+            codePhaseStep,
+            int(PRN),
+        )
+        if not corrPointer:
+            raise RuntimeError("GPU serial correlator failed")
+        return np.ctypeslib.as_array(corrPointer, shape=(12,)).copy()
+
+    def close(self):
+        """Release the reusable buffers allocated by the CUDA engine.
+        """
+        self._gpuLibrary.corrEngineFree()
+
+
+#%% CPU SIMD correlator for channel-parallel tracking
+class CorrSIMDParallelQPSK:
+    """Call the channel-parallel AVX2 QPSK tracking correlator."""
+
+    def __init__(self):
+        """Load the parallel SIMD DLL and declare its ctypes interface.
+        """
+        dllPath = "../native_Correlators/corrSIMDParallelQPSK.dll"
+        self._simdLibrary = ctypes.CDLL(dllPath)
+
+        int16Vector = np.ctypeslib.ndpointer(
+            dtype=np.int16, ndim=1, flags="C_CONTIGUOUS")
+        int32Vector = np.ctypeslib.ndpointer(
+            dtype=np.int32, ndim=1, flags="C_CONTIGUOUS")
+        int32Table = np.ctypeslib.ndpointer(
+            dtype=np.int32, ndim=2, flags="C_CONTIGUOUS")
+        float64Vector = np.ctypeslib.ndpointer(
+            dtype=np.float64, ndim=1, flags="C_CONTIGUOUS")
+
+        self._simdLibrary.corrEngine.argtypes = [
+            ctypes.c_int,    # settings.fileType
+            ctypes.c_int,    # rawSignal.size
+            ctypes.c_int,    # settings.rShiftBits
+            ctypes.c_double, # settings.dllCorrelatorSpacing
+            int16Vector,     # rawSignal
+            int32Table,      # E5bCodeTable
+            ctypes.c_int,    # codeLen
+            ctypes.c_int,    # channelCnt
+            float64Vector,   # remCarrPhase
+            float64Vector,   # carrPhaseStep
+            float64Vector,   # remCodePhase
+            float64Vector,   # codePhaseStep
+            int32Vector,     # startIdx
+            int32Vector,     # chSampSize
+            ctypes.c_int,    # isDataRead
+        ]
+        self._simdLibrary.corrEngine.restype = ctypes.POINTER(ctypes.c_double)
+        # The clearup function
+        self._simdLibrary.corrEngineFree.argtypes = []
+        self._simdLibrary.corrEngineFree.restype = None
+
+    def corrEngine(self, settings, rawSignal, E5bCodeTable,
+                   remCarrPhase, carrPhaseStep, remCodePhase, codePhaseStep,
+                   startIdx, chSampSize, isDataRead):
+        """Correlate all active channels against one shared IF block.
+
+        Args
+        ----
+            settings    - object
+                        Receiver settings containing ``fileType``,
+                        ``rShiftBits`` and ``dllCorrelatorSpacing``.
+            rawSignal   - numpy.ndarray
+                        Shared input int16 IF signal.
+            E5bCodeTable - numpy.ndarray
+                        C-contiguous int32 table containing concatenated
+                        guarded E5bI/E5bQ code branches for every channel.
+            remCarrPhase - numpy.ndarray
+                         Initial carrier phases in radians.
+            carrPhaseStep - numpy.ndarray
+                          Carrier phase increments in radians per sample.
+            remCodePhase - numpy.ndarray
+                         Initial code phases in chips.
+            codePhaseStep - numpy.ndarray
+                          Code phase increments in chips per sample.
+            startIdx    - numpy.ndarray
+                        Zero-based logical sample offsets in the shared
+                        signal block.
+            chSampSize  - numpy.ndarray
+                        Code-period sample count for each channel.
+            isDataRead  - int
+                        Shared-data refresh flag.
+
+        Returns
+        -------
+            correValues - numpy.ndarray
+                        Correlation matrix with shape ``(12, channelCnt)``.
+                        The first six rows are E5bI and the final six rows are
+                        E5bQ; each branch is ordered
+                        ``I_E, Q_E, I_P, Q_P, I_L, Q_L``.
+        """
+
+        channelCnt = startIdx.size
+        codeLen = E5bCodeTable.shape[1] // 2
+
+        corrPointer = self._simdLibrary.corrEngine(
+            settings.fileType,
+            rawSignal.size,
+            settings.rShiftBits,
+            settings.dllCorrelatorSpacing,
+            rawSignal,
+            E5bCodeTable,
+            codeLen,
+            channelCnt,
+            remCarrPhase,
+            carrPhaseStep,
+            remCodePhase,
+            codePhaseStep,
+            startIdx,
+            chSampSize,
+            isDataRead,
+        )
+        if not corrPointer:
+            raise RuntimeError("SIMD parallel correlator failed")
+
+        corrValues = np.ctypeslib.as_array(corrPointer, shape=(12 * channelCnt,))
+        return corrValues.reshape(channelCnt, 12).T.copy()
+
+    def close(self):
+        """Release the reusable buffers allocated by the SIMD engine.
+        """
+        self._simdLibrary.corrEngineFree()
+
+
+#%% GPU correlator for channel-parallel tracking
+class CorrGPUParallelQPSK:
+    """Call the channel-parallel CUDA QPSK tracking correlator."""
+
+    def __init__(self):
+        """Load the parallel CUDA DLL and declare its ctypes interface.
+
+        Returns
+        -------
+            None
+        """
+        dllPath = "../native_Correlators/corrGPUParallelQPSK.dll"
+        self._gpuLibrary = ctypes.CDLL(dllPath)
+
+        int16Vector = np.ctypeslib.ndpointer(
+            dtype=np.int16, ndim=1, flags="C_CONTIGUOUS")
+        int8Table = np.ctypeslib.ndpointer(
+            dtype=np.int8, ndim=2, flags="C_CONTIGUOUS")
+        int32Vector = np.ctypeslib.ndpointer(
+            dtype=np.int32, ndim=1, flags="C_CONTIGUOUS")
+        float64Vector = np.ctypeslib.ndpointer(
+            dtype=np.float64, ndim=1, flags="C_CONTIGUOUS")
+
+        self._gpuLibrary.corrEngine.argtypes = [
+            ctypes.c_int,     # settings.fileType
+            ctypes.c_int,     # rawSignal.size
+            ctypes.c_double,  # settings.dllCorrelatorSpacing
+            int16Vector,      # rawSignal
+            int8Table,        # E5bCodeTable
+            ctypes.c_int,     # codeLen
+            ctypes.c_int,     # channelCnt
+            float64Vector,    # remCarrPhase
+            float64Vector,    # carrPhaseStep
+            float64Vector,    # remCodePhase
+            float64Vector,    # codePhaseStep
+            int32Vector,      # startIdx
+            int32Vector,      # chSampSize
+            ctypes.c_int,     # isDataRead
+        ]
+        self._gpuLibrary.corrEngine.restype = ctypes.POINTER(ctypes.c_double)
+        # The clearup function
+        self._gpuLibrary.corrEngineFree.argtypes = []
+        self._gpuLibrary.corrEngineFree.restype = None
+
+    def corrEngine(self, settings, rawSignal, E5bCodeTable,
+                   remCarrPhase, carrPhaseStep, remCodePhase, codePhaseStep,
+                   startIdx, chSampSize, isDataRead):
+        """Correlate all active channels against one shared IF block.
+
+        Args
+        ----
+            settings    - object
+                        Receiver settings containing ``fileType`` and
+                        ``dllCorrelatorSpacing``.
+            rawSignal   - numpy.ndarray
+                        Shared input int16 IF signal.
+            E5bCodeTable - numpy.ndarray
+                        C-contiguous int8 table containing concatenated
+                        guarded E5bI/E5bQ code branches for every channel.
+            remCarrPhase - numpy.ndarray
+                         Residual carrier phases in radians.
+            carrPhaseStep - numpy.ndarray
+                          Carrier phase increments in radians per sample.
+            remCodePhase - numpy.ndarray
+                         Residual code phases in chips.
+            codePhaseStep - numpy.ndarray
+                          Code phase increments in chips per sample.
+            startIdx    - numpy.ndarray
+                        Zero-based logical sample offsets in ``rawSignal``.
+            chSampSize  - numpy.ndarray
+                        Logical sample count for each channel.
+            isDataRead  - int
+                        ``1`` uploads new data; ``0`` reuses the data.
+
+        Returns
+        -------
+            correValues - numpy.ndarray
+                        Correlation matrix with shape ``(12, channelCnt)``.
+                        The first six rows are E5bI and the final six rows are
+                        E5bQ; each branch is ordered
+                        ``I_E, Q_E, I_P, Q_P, I_L, Q_L``.
+        """
+        channelCnt = startIdx.size
+        codeLen = E5bCodeTable.shape[1] // 2
+        corrPointer = self._gpuLibrary.corrEngine(
+            settings.fileType,
+            rawSignal.size,
+            settings.dllCorrelatorSpacing,
+            rawSignal,
+            E5bCodeTable,
+            codeLen,
+            channelCnt,
+            remCarrPhase,
+            carrPhaseStep,
+            remCodePhase,
+            codePhaseStep,
+            startIdx,
+            chSampSize,
+            isDataRead,
+        )
+        if not corrPointer:
+            raise RuntimeError("GPU parallel correlator failed")
+
+        corrValues = np.ctypeslib.as_array(corrPointer, shape=(12 * channelCnt,))
+        return corrValues.reshape(channelCnt, 12).T.copy()
+
+    def close(self):
+        """Release buffers allocated by the CUDA engine.
+        """
+        self._gpuLibrary.corrEngineFree()
+
+
+#%% Python (Numpy) correlator for channel-serial tracking
+def corrPySerialQPSK(settings, rawSignal, E5bCodeTable, remCarrPhase,
+                     carrPhaseStep, remCodePhase, codePhaseStep):
+    """Correlate one E5b channel with the local E5bI and E5bQ codes.
+
+    Args
+    ----
+        settings      - object
+                      Receiver settings containing ``fileType`` and
+                      ``dllCorrelatorSpacing``.
+        rawSignal     - ndarray
+                      IF samples for one E5b code period. Complex samples are
+                      represented by interleaved I and Q values.
+        E5bCodeTable - numpy.ndarray
+                      Guarded local-code vector containing the E5bI data and
+                      E5bQ pilot codes in that order.
+        remCarrPhase - float
+                      Residual carrier phase in radians.
+        carrPhaseStep - float
+                       Carrier phase increment in radians per sample.
+        remCodePhase - float
+                      Residual primary-code phase in chips.
+        codePhaseStep - float
+                       Code-phase increment in chips per IF sample.
+    Returns
+    -------
+        correValues   - ndarray
+                      Twelve accumulated I/Q correlations. Each group of six
+                      is ordered as ``I_E, Q_E, I_P, Q_P, I_L, Q_L`` for the
+                      E5bI data and E5bQ pilot branches, respectively.
+    """
+    # Split the shared QPSK table into its two equal guarded branches.
+    codeLen = E5bCodeTable.size // 2
+    E5bCodeD = E5bCodeTable[:codeLen]
+    E5bCodeP = E5bCodeTable[codeLen:]
+    # Define early-late offset in chips.
+    earlyLateSpc = settings.dllCorrelatorSpacing
+
+    # Allocate the E5bI data and E5bQ pilot outputs.
+    correValues = np.zeros(12, dtype=np.float64)
+
+    # For complex data, form one complex vector from interleaved I/Q samples.
+    if settings.fileType == 2:
+        rawSignal = rawSignal[::2] + 1j * rawSignal[1::2]
+
+    blksize = rawSignal.size
+
+    # --- Generate local code replicas -------------------------------------
+    # Time index for each sampling point.
+    sampleInd = np.arange(blksize)
+    codeInd = sampleInd * codePhaseStep
+    # Python uses zero-based indices, so MATLAB's trailing +1 local-code
+    # offset is not required below.
+
+    # Define index into early code vectors.
+    tcode = remCodePhase - earlyLateSpc + codeInd
+    tcode2 = np.ceil(tcode).astype(np.int32)
+    earlyCodeD = E5bCodeD[tcode2]
+    earlyCodeP = E5bCodeP[tcode2]
+
+    # Define index into late code vectors.
+    tcode = remCodePhase + earlyLateSpc + codeInd
+    tcode2 = np.ceil(tcode).astype(np.int32)
+    lateCodeD = E5bCodeD[tcode2]
+    lateCodeP = E5bCodeP[tcode2]
+
+    # Define index into prompt code vectors.
+    tcode = remCodePhase + codeInd
+    tcode2 = np.ceil(tcode).astype(np.int32)
+    promptCodeD = E5bCodeD[tcode2]
+    promptCodeP = E5bCodeP[tcode2]
+
+    # --- Generate the carrier frequency to mix the signal to baseband ------
+    # Get the argument to sin/cos functions.
+    trigarg = sampleInd * carrPhaseStep + remCarrPhase
+    # Compute the signal used to mix the collected data to baseband.
+    carrsig = np.exp(-1j * trigarg)
+
+    # --- Do correlation to generate the standard accumulated values --------
+    # First mix to baseband.
+    basebandSignal = carrsig * rawSignal
+    iBasebandSignal = basebandSignal.real
+    qBasebandSignal = basebandSignal.imag
+
+    # Get Early, Prompt, and Late accumulated values for the data channel.
+    correValues[:6] = (earlyCodeD.dot(iBasebandSignal),
+                       earlyCodeD.dot(qBasebandSignal),
+                       promptCodeD.dot(iBasebandSignal),
+                       promptCodeD.dot(qBasebandSignal),
+                       lateCodeD.dot(iBasebandSignal),
+                       lateCodeD.dot(qBasebandSignal))
+
+    # Get Early, Prompt, and Late accumulated values for the pilot channel.
+    correValues[6:12] = (earlyCodeP.dot(iBasebandSignal),
+                         earlyCodeP.dot(qBasebandSignal),
+                         promptCodeP.dot(iBasebandSignal),
+                         promptCodeP.dot(qBasebandSignal),
+                         lateCodeP.dot(iBasebandSignal),
+                         lateCodeP.dot(qBasebandSignal))
+    return correValues
+
+
+#%% Python (Numpy) correlator for channel-parallel tracking
+def corrPyParallelQPSK(settings, rawSignal, E5bCodeTable, remCarrPhase,
+                       carrPhaseStep, remCodePhase, codePhaseStep,
+                       startIdx, chSampSize, isDataRead):
+    """Correlate all active E5b channels against one shared IF block.
+
+    This function has the same calling interface as the SIMD and GPU
+    correlators. Each output column is ordered as
+    ``[I_E, Q_E, I_P, Q_P, I_L, Q_L, pilot_I_E, pilot_Q_E,
+    pilot_I_P, pilot_Q_P, pilot_I_L, pilot_Q_L]``.
+
+    Args
+    ----
+        settings      - object
+                      Receiver settings containing ``fileType`` and
+                      ``dllCorrelatorSpacing``.
+        rawSignal     - ndarray
+                      Shared IF-signal block. Complex samples are stored as
+                      interleaved I and Q values.
+        E5bCodeTable - numpy.ndarray
+                      One guarded E5bI/E5bQ local-code row for each active
+                      channel.
+        remCarrPhase - ndarray
+                      Residual carrier phase for each channel, in radians.
+        carrPhaseStep - ndarray
+                       Carrier phase increment for each channel, in radians
+                       per sample.
+        remCodePhase - ndarray
+                      Residual code phase for each channel.
+        codePhaseStep - ndarray
+                       Code-phase increment for each channel.
+        startIdx     - ndarray
+                      Start sample of each channel within ``rawSignal``.
+        chSampSize   - ndarray
+                      Number of samples in each channel's code period.
+        isDataRead   - int
+                      Shared-data refresh flag retained for interface parity.
+    Returns
+    -------
+        correValues   - ndarray
+                      A ``12 x channelCnt`` matrix. Each column contains
+                      ``I_E, Q_E, I_P, Q_P, I_L, Q_L`` for E5bI and E5bQ.
+    """
+    # For complex data, split the interleaved buffer [I0 Q0 I1 Q1 ...] into
+    # I and Q views of the shared input block.
+    if settings.fileType == 2:
+        rawSignalI = rawSignal[::2]
+        rawSignalQ = rawSignal[1::2]
+
+    # Number of active tracking channels in this tracking epoch.
+    channelCnt = startIdx.size
+    # Output order per channel contains data and pilot values. Each group of
+    # six is [I_E, Q_E, I_P, Q_P, I_L, Q_L].
+    correValues = np.zeros((12, channelCnt), dtype=np.float64)
+    # Define early-late offset in primary-code chips.
+    earlyLateSpc = settings.dllCorrelatorSpacing
+
+    for channelNr in range(channelCnt):
+        # Find the size of the current code period and the start index of this
+        # channel block within the shared rawSignal buffer.
+        blksize = chSampSize[channelNr]
+        codeStartIdx = startIdx[channelNr]
+
+        # Get the two local-code branches for the current channel. The table
+        # already contains the guard values required by ceil(tcode).
+        E5bCode = E5bCodeTable[channelNr, :]
+        codeLen = E5bCode.size // 2
+        E5bCodeD = E5bCode[:codeLen]
+        E5bCodeP = E5bCode[codeLen:]
+
+        # Extract the current real or complex signal block.
+        signalIndex = slice(codeStartIdx, codeStartIdx + blksize)
+        if settings.fileType == 1:
+            rawSignalBlock = rawSignal[signalIndex]
+        else:
+            rawSignalBlockI = rawSignalI[signalIndex]
+            rawSignalBlockQ = rawSignalQ[signalIndex]
+            rawSignalBlock = rawSignalBlockI + 1j * rawSignalBlockQ
+
+        # --- Set up all the code-phase tracking information ----------------
+        sampleIndex = np.arange(blksize)
+        codePhase = (remCodePhase[channelNr]
+                     + codePhaseStep[channelNr] * sampleIndex)
+
+        # Define index into Early code vectors.
+        tcode = np.ceil(codePhase - earlyLateSpc).astype(np.int32)
+        earlyCodeD = E5bCodeD[tcode]
+        earlyCodeP = E5bCodeP[tcode]
+
+        # Define index into Late code vectors.
+        tcode = np.ceil(codePhase + earlyLateSpc).astype(np.int32)
+        lateCodeD = E5bCodeD[tcode]
+        lateCodeP = E5bCodeP[tcode]
+
+        # Define index into Prompt code vectors. Python uses zero-based
+        # indices, so MATLAB's trailing +1 index offset is not required.
+        tcode = np.ceil(codePhase).astype(np.int32)
+        promptCodeD = E5bCodeD[tcode]
+        promptCodeP = E5bCodeP[tcode]
+
+        # --- Generate the carrier frequency to mix the signal to baseband ---
+        # carrPhaseStep is already the carrier phase step in radians per
+        # sample, so form the local carrier directly from sample indices.
+        trigarg = (carrPhaseStep[channelNr] * sampleIndex
+                   + remCarrPhase[channelNr])
+        carrsig = np.exp(-1j * trigarg)
+
+        # --- Do correlation to generate the standard accumulated values -----
+        # First mix to baseband.
+        basebandSignal = carrsig * rawSignalBlock
+        iBasebandSignal = basebandSignal.real
+        qBasebandSignal = basebandSignal.imag
+
+        # Get Early, Prompt, and Late values for the data channel.
+        correValues[:6, channelNr] = (
+            earlyCodeD.dot(iBasebandSignal),
+            earlyCodeD.dot(qBasebandSignal),
+            promptCodeD.dot(iBasebandSignal),
+            promptCodeD.dot(qBasebandSignal),
+            lateCodeD.dot(iBasebandSignal),
+            lateCodeD.dot(qBasebandSignal))
+
+        # Get Early, Prompt, and Late values for the pilot channel.
+        correValues[6:12, channelNr] = (
+            earlyCodeP.dot(iBasebandSignal),
+            earlyCodeP.dot(qBasebandSignal),
+            promptCodeP.dot(iBasebandSignal),
+            promptCodeP.dot(qBasebandSignal),
+            lateCodeP.dot(iBasebandSignal),
+            lateCodeP.dot(qBasebandSignal))
+    return correValues
+
+
+#%% Galileo E5bI-code generation -------------------------------------------
+@lru_cache(maxsize=100)
+def generateDataCode(PRN, flag=1):
+    """Generate a Galileo E5bI primary or tiered code.
+
+    Args
+    ----
+        PRN         - int
+                     PRN number of the sequence.
+        flag        - int
+                     1: primary code; 2: tiered code.
+
+    Returns
+    -------
+        E5bI        - ndarray
+                     E5bI primary/tiered code sequence in bipolar format.
+    """
+    # Start values for Register 1 are all ones.
+    Register1 = np.ones(14, dtype=np.int8)
+
+    # Initial-state table for Register 2 from the Galileo OS SIS ICD.
+    e5bi_init2 = tuple(int(value, 8) for value in (
+        "07220 26047 00252 17166 14161 02540 01537 26023 01725 20637 "
+        "02364 27731 30640 34174 06464 07676 32231 10353 00755 26077 "
+        "11644 11537 35115 20452 34645 25664 21403 32253 02337 30777 "
+        "27122 22377 36175 33075 33151 13134 07433 10216 35466 02533 "
+        "05351 30121 14010 32576 30326 37433 26022 35770 06670 12017"
+    ).split())
+
+    # Feedback-tap coefficients for Registers 1 and 2. Take the 14
+    # significant bits from higher to lower register stages.
+    taps1_coef = np.fromiter(
+        (int(bit) for bit in f"{int('64021', 8):015b}"[:14]),
+        dtype=np.int8)
+    taps2_coef = np.fromiter(
+        (int(bit) for bit in f"{int('51445', 8):015b}"[:14]),
+        dtype=np.int8)
+
+    # Start values for Register 2. The fixed-width binary conversion keeps
+    # a possible leading zero that MATLAB dec2bin otherwise omits.
+    PRN = int(PRN)
+    # Python uses zero-based table indices; MATLAB selects row PRN.
+    Register2 = np.fromiter(
+        (int(bit) for bit in f"{e5bi_init2[PRN-1]:014b}"), dtype=np.int8)
+
+    # Generate the E5bI primary code.
+    Pri_E5bI = np.empty(10230, dtype=np.int8)
+    for ind in range(Pri_E5bI.size):
+        RegOut1 = Register1*taps1_coef
+        RegOut2 = Register2*taps2_coef
+        Pri_E5bI[ind] = ((1-2*RegOut1[0])*(1-2*RegOut2[0]))
+        # Exclusive-OR feedback. NumPy XOR on the binary taps is equivalent
+        # to the bipolar product and reconversion used in MATLAB.
+        feedback1 = np.bitwise_xor.reduce(RegOut1)
+        feedback2 = np.bitwise_xor.reduce(RegOut2)
+        Register1[:-1] = Register1[1:]
+        Register2[:-1] = Register2[1:]
+        Register1[-1] = feedback1
+        Register2[-1] = feedback2
+
+    #----- E5bI primary or tiered code generation -------------------------
+    if flag == 1:
+        return Pri_E5bI
+    SecondaryCode = np.array([-1,-1,-1,1], dtype=np.int8)
+    return np.tile(Pri_E5bI, SecondaryCode.size)*np.repeat(
+        SecondaryCode, Pri_E5bI.size)
+
+
+#%% Galileo E5bQ-code generation -------------------------------------------
+@lru_cache(maxsize=100)
+def generatePilotCode(PRN, flag=1):
+    """Generate a Galileo E5bQ primary code.
+
+    Args
+    ----
+        PRN         - int
+                     PRN number of the sequence.
+        flag        - int
+                     1: primary code. The tracking chain uses this mode.
+
+    Returns
+    -------
+        E5bQ        - ndarray
+                     E5bQ primary code sequence in bipolar format.
+    """
+    # Start values for Register 1 are all ones.
+    Register1 = np.ones(14, dtype=np.int8)
+
+    # Initial-state table for Register 2 from the Galileo OS SIS ICD.
+    e5bq_init2 = tuple(int(value, 8) for value in (
+        "03331 06143 25322 23371 00413 36235 17750 04745 13005 37140 "
+        "30155 20237 03461 31662 27146 05547 02456 30013 00322 10761 "
+        "26767 36004 30713 07662 21610 20134 11262 10706 34143 11051 "
+        "25460 17665 32354 21230 20146 11362 37246 16344 15034 25471 "
+        "25646 22157 04336 16356 04075 02626 11706 37011 27041 31024"
+    ).split())
+
+    # Feedback-tap coefficients for Registers 1 and 2. Take the 14
+    # significant bits from higher to lower register stages.
+    taps1_coef = np.fromiter(
+        (int(bit) for bit in f"{int('64021', 8):015b}"[:14]),
+        dtype=np.int8)
+    taps2_coef = np.fromiter(
+        (int(bit) for bit in f"{int('43143', 8):015b}"[:14]),
+        dtype=np.int8)
+
+    # Start values for Register 2. The fixed-width binary conversion keeps
+    # a possible leading zero that MATLAB dec2bin otherwise omits.
+    PRN = int(PRN)
+    # Python uses zero-based table indices; MATLAB selects row PRN.
+    Register2 = np.fromiter(
+        (int(bit) for bit in f"{e5bq_init2[PRN-1]:014b}"), dtype=np.int8)
+
+    # Generate the E5bQ primary code.
+    Pri_E5bQ = np.empty(10230, dtype=np.int8)
+    for ind in range(Pri_E5bQ.size):
+        RegOut1 = Register1*taps1_coef
+        RegOut2 = Register2*taps2_coef
+        Pri_E5bQ[ind] = ((1-2*RegOut1[0])*(1-2*RegOut2[0]))
+        # Exclusive-OR feedback. NumPy XOR on the binary taps is equivalent
+        # to the bipolar product and reconversion used in MATLAB.
+        feedback1 = np.bitwise_xor.reduce(RegOut1)
+        feedback2 = np.bitwise_xor.reduce(RegOut2)
+        Register1[:-1] = Register1[1:]
+        Register2[:-1] = Register2[1:]
+        Register1[-1] = feedback1
+        Register2[-1] = feedback2
+
+    #----- E5bQ primary or tiered code generation -------------------------
+    if flag == 1:
+        return Pri_E5bQ
+    raise ValueError("E5bQ tiered-code generation is not used by this receiver")
+
+
+#%% Galileo E5bI/E5bQ-code sampling ---------------------------------------
+def codeSampling(settings, PRN, sampleLen, component):
+    """Generate and sample one Galileo E5b primary-code component.
+
+    Args
+    ----
+        settings    - object
+                    Receiver settings.
+        PRN         - int
+                    PRN number of the sequence.
+        sampleLen   - int
+                    Number of output samples.
+        component   - str
+                    ``"data"`` for E5bI or ``"pilot"`` for E5bQ.
+
+    Returns
+    -------
+        codeSamples - numpy.ndarray
+                    Sampled E5b primary code for the specified PRN.
+    """
+    #--- Generate the selected E5b primary code ---------------------------
+    if component == "data":
+        code = generateDataCode(int(PRN))
+    elif component == "pilot":
+        code = generatePilotCode(int(PRN))
+    else:
+        raise ValueError('component must be "data" or "pilot"')
+
+    #=== Digitizing ========================================================
+    #--- Make the index array used to read E5b-code values ----------------
+    codeValueIndex = np.ceil(
+        np.arange(1, sampleLen + 1) * code.size /
+        settings.samplesPerCode).astype(np.int32) - 1
+
+    #--- Correct the last index due to numerical rounding -----------------
+    codeValueIndex[-1] = code.size - 1
+
+    #--- Make the digitized version of the E5b code -----------------------
+    return code[codeValueIndex]

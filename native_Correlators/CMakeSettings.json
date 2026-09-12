@@ -1,0 +1,38 @@
+﻿{
+  "configurations": [
+    {
+      "name": "x64-Debug",
+      "generator": "Ninja",
+      "configurationType": "Debug",
+      "inheritEnvironments": [ "msvc_x64_x64" ],
+      "environments": [
+        {
+          "TEMP": "C:\\Users\\YAFENG~1\\AppData\\Local\\Temp",
+          "TMP": "C:\\Users\\YAFENG~1\\AppData\\Local\\Temp"
+        }
+      ],
+      "buildRoot": "${projectDir}\\build\\${name}",
+      "installRoot": "${projectDir}\\build\\install\\${name}",
+      "cmakeCommandArgs": "",
+      "buildCommandArgs": "",
+      "ctestCommandArgs": ""
+    },
+    {
+      "name": "x64-Release",
+      "generator": "Ninja",
+      "configurationType": "Release",
+      "inheritEnvironments": [ "msvc_x64_x64" ],
+      "environments": [
+        {
+          "TEMP": "C:\\Users\\YAFENG~1\\AppData\\Local\\Temp",
+          "TMP": "C:\\Users\\YAFENG~1\\AppData\\Local\\Temp"
+        }
+      ],
+      "buildRoot": "${projectDir}\\build\\${name}",
+      "installRoot": "${projectDir}\\build\\install\\${name}",
+      "cmakeCommandArgs": "",
+      "buildCommandArgs": "",
+      "ctestCommandArgs": ""
+    }
+  ]
+}

@@ -1,0 +1,31 @@
+GNSS ICD list
+
+GPS
+  IS-GPS-200N.pdf: L1 C/A, L1/L2 P(Y), L2C
+  IS-GPS-705J.pdf: L5
+  IS-GPS-800J.pdf: L1C
+  IRN-IS-200N-003.pdf; IRN-IS-200N-004_RFC519_20260616.pdf: IS-GPS-200N updates
+  IRN-IS-705J-003.pdf; IRN-IS-705J-004_RFC519_20260616.pdf: IS-GPS-705J updates
+  IRN-IS-800J-003.pdf; IRN-IS-800J-004_RFC519_20260616.pdf: IS-GPS-800J updates
+
+BDS
+  北斗ICD B1I v3.0.pdf; 北斗ICD B1I v3.0 English version.pdf: B1I
+  北斗ICD B3I v1.0.pdf; 北斗ICD B3I v1.0 English version.pdf: B3I
+  北斗3ICD B1C（1.0版）.pdf; 北斗3ICD B1C v1.0 English version.pdf: B1C
+  北斗3ICD B2a（1.0版）.pdf; 北斗3ICD B2a v1.0 English version.pdf: B2a
+  北斗3ICD B2b.pdf; 北斗3ICD B2b v1.0 English version.pdf: B2b
+
+Galileo
+  Galileo_OS_SIS_ICD_in_force.pdf: E1, E5a, E5b
+  Galileo_E6BC_SIS_Technical_Note.pdf: E6-B/E6-C
+  Galileo_HAS_SIS_ICD_v1.0.pdf: E6-B HAS
+
+GLONASS
+  ICD_GLONASS_5.1_(2008)_en.pdf: L1/L2 FDMA
+  ICD-GLONASS-CDMA-General.-Edition-1.0-2016.pdf: CDMA overview
+  ICD-GLONASS_CDMA_L1.pdf: L1 CDMA
+  ICD-GLONASS-CDMA-L2.-Edition-1.0-2016.pdf: L2 CDMA
+  ICD-GLONASS-CDMA-L3.-Edition-1.0-2016.pdf: L3 CDMA
+
+QZSS
+  is-qzss-*.pdf: QZSS reference documents
