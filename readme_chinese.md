@@ -5,15 +5,15 @@
 
 Overview
 -------------------------------------------------------------------------------
-pySoftGNSS 是一个基于 Python 的开源工具箱，用于对录制的 GNSS 中频（IF）信号进行后处理。
-它与 mSoftGNSS 遵循共同的接收机处理架构，并以 Python 模块和类组织信号处理功能。
-工具箱支持 GPS、Galileo、GLONASS 和北斗信号，根据各信号已实现的处理能力，提供捕获、
-数据/导频跟踪、导航电文解码、伪距生成和定位功能。CPU 和 GPU 捕获分别使用 NumPy/SciPy 和 CuPy。
-通道串行和通道并行两种跟踪模式均支持 NumPy 相关器、SIMD 加速相关器和 GPU 加速相关器。
-通道并行跟踪复用共享 IF 数据缓冲，并批量执行各通道的相关任务。C++ 和 CUDA C++ 相关器编译为
-动态链接库，通过 ctypes.CDLL 调用；调度、跟踪环路控制、导航解码和定位仍在 Python 中完成。
+pySoftGNSS是一个基于Python的开源工具箱，用于对录制的GNSS中频（IF）信号进行后处理。
+它与mSoftGNSS遵循共同的接收机处理架构，并以Python模块和类组织信号处理功能。
+工具箱支持GPS、Galileo、GLONASS 和北斗信号，根据各信号已实现的处理能力，提供捕获、
+数据/导频跟踪、导航电文解码、伪距生成和定位功能。CPU和GPU捕获分别使用NumPy/SciPy和CuPy。
+通道串行和通道并行两种跟踪模式均支持NumPy相关器、SIMD加速相关器和GPU加速相关器。
+通道并行跟踪复用共享IF数据缓冲，并批量执行各通道的相关任务。C++和CUDA C++相关器编译为
+动态链接库，通过ctypes.CDLL调用；调度、跟踪环路控制、导航解码和定位仍在Python中完成。
 这种设计在保留高层处理可读性和可配置性的同时，加速了计算密集的样本级运算。
-结合现代化信号支持、LDPC 解码和集成的可视化功能，pySoftGNSS 为 GNSS 算法开发、
+结合现代化信号支持、LDPC解码和集成的可视化功能，pySoftGNSS为GNSS算法开发、
 接收机原型开发和可重复评估提供了可扩展的平台。
 
 
@@ -107,7 +107,7 @@ Directory and Files
     ./pyGlonass_L1OC          GLONASS L1OC 软件接收机
     ./pyGlonass_L2OC          GLONASS L2OC 软件接收机
     ./pyGlonass_L3OC          GLONASS L3OC 软件接收机
-    ./pyBDS_B1I               北斗 B1I/B2I 软件接收机
+    ./pyBDS_B1I               北斗 B1I软件接收机
     ./pyBDS_B3I               北斗 B3I 软件接收机
     ./pyBDS-3_B1C             北斗三号 B1C 软件接收机
     ./pyBDS-3_B2a             北斗三号 B2a 软件接收机

@@ -75,7 +75,7 @@ Features
     * GLONASS L1OC
     * GLONASS L2OC (pilot tracking only)
     * GLONASS L3OC
-    * BeiDou B1I/B2I
+    * BeiDou B1I
     * BeiDou B3I
     * BDS-3 B1C (data + pilot)
     * BDS-3 B2a (data + pilot)
